@@ -19,8 +19,12 @@
  * along with ____. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use super::bindings::{
-    self, sqlite3, sqlite3_bind_int, sqlite3_bind_text, sqlite3_close, sqlite3_column_int,
+#[allow(non_camel_case_types)]
+#[allow(non_snake_case)]
+#[allow(dead_code)]
+mod bindings;
+use self::bindings::{
+    sqlite3, sqlite3_bind_int, sqlite3_bind_text, sqlite3_close, sqlite3_column_int,
     sqlite3_column_text, sqlite3_exec, sqlite3_finalize, sqlite3_open_v2, sqlite3_prepare_v2,
     sqlite3_reset, sqlite3_step, sqlite3_stmt, SQLITE_OK, SQLITE_OPEN_CREATE, SQLITE_OPEN_READONLY,
     SQLITE_OPEN_READWRITE, SQLITE_ROW,
