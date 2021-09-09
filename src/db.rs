@@ -20,12 +20,13 @@
  */
 
 use super::bindings::{
-    self, sqlite3, sqlite3_bind_int, sqlite3_bind_text, sqlite3_close, sqlite3_column_int, sqlite3_column_text,
-    sqlite3_exec, sqlite3_finalize, sqlite3_open_v2, sqlite3_prepare_v2, sqlite3_reset,
-    sqlite3_step, sqlite3_stmt, SQLITE_OK, SQLITE_OPEN_CREATE, SQLITE_OPEN_READONLY,
+    self, sqlite3, sqlite3_bind_int, sqlite3_bind_text, sqlite3_close, sqlite3_column_int,
+    sqlite3_column_text, sqlite3_exec, sqlite3_finalize, sqlite3_open_v2, sqlite3_prepare_v2,
+    sqlite3_reset, sqlite3_step, sqlite3_stmt, SQLITE_OK, SQLITE_OPEN_CREATE, SQLITE_OPEN_READONLY,
     SQLITE_OPEN_READWRITE, SQLITE_ROW,
 };
 use flate2::read::GzDecoder;
+use regex::Regex;
 use std::collections::*;
 use std::env;
 use std::fs::File;
@@ -95,6 +96,15 @@ impl Statement {
         Ok(())
     }
 
+    pub fn get_text(&mut self, index: usize) -> Result<String, String> {
+        let ptr = unsafe { sqlite3_column_text(self.ptr.as_mut(), index as _) };
+        if ptr.is_null() {
+            return Err(format!("sqlite3_column_text {} returned Null", index));
+        }
+        let slice = unsafe { std::ffi::CStr::from_ptr(ptr as _) };
+        Ok(slice.to_string_lossy().to_string())
+    }
+
     pub fn step(&mut self) -> Result<bool, String> {
         let ret = unsafe { sqlite3_step(self.ptr.as_mut()) };
         //if ret as u32 != SQLITE_OK {
@@ -151,7 +161,7 @@ impl Database {
     }
 
     pub fn run_create_statements(&mut self) -> Result<(), String> {
-        let sql = b"CREATE TABLE IF NOT EXISTS page( id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, section INT NOT NULL, path TEXT NOT NULL UNIQUE, last_modified INT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, name, content, detail=none, tokenize=\"trigram\");\0";
+        let sql = b"CREATE TABLE IF NOT EXISTS page( id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT NOT NULL, section INT NOT NULL, path TEXT NOT NULL UNIQUE, last_modified INT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, name, content, detail=none, tokenize=\"trigram\");\0";
 
         let mut errmsg = std::ptr::null_mut();
         let ret = unsafe {
@@ -223,9 +233,14 @@ impl Database {
         }
         println!("{:#?}", &pages);
 
-        let mut stmt_insert = Statement::new( self, b"INSERT INTO page(name, section, path,last_modified) VALUES(?, ?, ?, 0) RETURNING id\0")?;
-        let mut stmt_fts = Statement::new(self, b"INSERT INTO fts(id, name, content) VALUES(?, ?, ?)\0")?;
+        let mut stmt_insert = Statement::new( self, b"INSERT OR IGNORE INTO page(name, description, section, path,last_modified) VALUES(?, ?, ?, ?, 0) RETURNING id\0")?;
+        let mut stmt_fts = Statement::new(
+            self,
+            b"INSERT OR IGNORE INTO fts(id, name, content) VALUES(?, ?, ?)\0",
+        )?;
 
+        let nl_re = Regex::new(r"\n(?P<S>\S)").unwrap();
+        let ws_re = Regex::new(r"\s\s+").unwrap();
         for page in pages.drain() {
             if let Ok(mut f) = File::open(&page) {
                 let mut bytes = vec![];
@@ -244,20 +259,53 @@ impl Database {
                         std::thread::spawn(move || {
                             stdin.write_all(&bytes2).unwrap();
                         });
+                        let mandoc_output = mandoc
+                            .wait_with_output()
+                            .expect("Failed to read stdout")
+                            .stdout;
+                        let mut col = std::process::Command::new("col")
+                            .args(["-b"])
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .spawn()
+                            .unwrap();
+                        let mut stdin = col.stdin.take().expect("Failed to open stdin");
+                        std::thread::spawn(move || {
+                            stdin.write_all(&mandoc_output).unwrap();
+                        });
                         println!("mandoc {:#?}", &page);
                         let s = String::from_utf8_lossy(
-                            &mandoc
-                                .wait_with_output()
+                            &col.wait_with_output()
                                 .expect("Failed to read stdout")
                                 .stdout,
                         )
                         .to_string();
+                        let description = if let Some(start_pos) = s.find("NAME") {
+                            if let Some(end_pos) = s[start_pos..].find("\n\n") {
+                                let desc =
+                                    s[start_pos + "NAME".len()..(start_pos + end_pos)].trim();
+                                ws_re
+                                    .replace_all(&nl_re.replace_all(desc, "$S"), " ")
+                                    .to_string()
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        println!("DESC IS {:?}", &description);
                         println!("inserting {:#?}", &page);
-                        let fname = page.file_name().unwrap().to_str().unwrap().trim_end_matches(".gz");
+                        let fname = page
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .trim_end_matches(".gz");
                         stmt_insert.bind_text(1, fname)?;
-                        stmt_insert.bind_int(2, 1)?;
+                        stmt_insert.bind_text(2, &description)?;
+                        stmt_insert.bind_int(3, 1)?;
                         //stmt_insert.bind_text(3, &s)?;
-                        stmt_insert.bind_text(3, page.to_str().unwrap())?;
+                        stmt_insert.bind_text(4, page.to_str().unwrap())?;
                         if stmt_insert.step()? {
                             let id = unsafe { sqlite3_column_int(stmt_insert.ptr.as_mut(), 0) };
 
@@ -283,45 +331,55 @@ impl Database {
     }
 
     pub fn query(&mut self, mut query: String) -> Result<(), String> {
-        let mut names : BTreeSet<String> = Default::default();
+        let mut names: BTreeSet<String> = Default::default();
         if !query.starts_with("*") {
             query.insert(0, '*');
         }
         if !query.ends_with("*") {
             query.push('*');
         }
+        let mut results: Vec<(String, String)> = Default::default();
         {
-        let mut stmt = Statement::new(self, b"select name from fts where name glob ? ORDER BY bm25(fts) LIMIT 15\0")?;
-        //let query = query.replace("\"", "\"\"");
-        stmt.bind_text(1, &query)?;
-        while stmt.step()? {
-            let ptr = unsafe { sqlite3_column_text(stmt.ptr.as_mut(), 0) };
-            if ptr.is_null() {
-                continue;
+            let mut stmt = Statement::new(
+                self,
+                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.name glob ? ORDER BY bm25(fts) LIMIT 15\0",
+            )?;
+            //let query = query.replace("\"", "\"\"");
+            stmt.bind_text(1, &query)?;
+            while stmt.step()? {
+                let name = stmt.get_text(0)?;
+                let description = stmt.get_text(1)?;
+                //let description = String::new();
+                //println!("{} - {}", name, description);
+                names.insert(name.to_string());
+                results.push((name, description));
             }
-            let slice = unsafe { std::ffi::CStr::from_ptr(ptr as _) };
-            let s = slice.to_string_lossy();
-            println!("{}", s);
-            names.insert(s.to_string());
-        }
 
-        drop(stmt);
+            drop(stmt);
         }
+        let first_col_width = results.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
+        for (name, description) in results {
+            println!("{:width$} - {}", name, description, width = first_col_width);
+        }
+        let mut results: Vec<(String, String)> = Default::default();
         println!("\ncontent matches:");
-        let mut stmt = Statement::new(self, b"select name from fts where content glob ? ORDER BY bm25(fts) LIMIT 15\0")?;
+        let mut stmt = Statement::new(
+            self,
+                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.content glob ? ORDER BY bm25(fts) LIMIT 15\0",
+        )?;
         //let query = query.replace("\"", "\"\"");
         stmt.bind_text(1, &query)?;
         while stmt.step()? {
-            let ptr = unsafe { sqlite3_column_text(stmt.ptr.as_mut(), 0) };
-            if ptr.is_null() {
+            let name = stmt.get_text(0)?;
+            let description = stmt.get_text(1)?;
+            if names.contains(name.as_str()) {
                 continue;
             }
-            let slice = unsafe { std::ffi::CStr::from_ptr(ptr as _) };
-            let s = slice.to_string_lossy();
-            if names.contains(s.as_ref()) {
-                continue;
-            }
-            println!("{}", s);
+            results.push((name, description));
+        }
+        let first_col_width = results.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
+        for (name, description) in results {
+            println!("{:width$} - {}", name, description, width = first_col_width);
         }
 
         drop(stmt);
