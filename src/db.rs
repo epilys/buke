@@ -1,22 +1,22 @@
 /*
- * ____
+ * buke
  *
- * Copyright ____  Manos Pitsidianakis
+ * Copyright 2021 buke  Manos Pitsidianakis
  *
- * This file is part of ____.
+ * This file is part of buke.
  *
- * ____ is free software: you can redistribute it and/or modify
+ * buke is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * ____ is distributed in the hope that it will be useful,
+ * buke is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with ____. If not, see <http://www.gnu.org/licenses/>.
+ * along with buke. If not, see <http://www.gnu.org/licenses/>.
  */
 
 #[allow(non_camel_case_types)]
@@ -25,10 +25,11 @@
 mod bindings;
 use self::bindings::{
     sqlite3, sqlite3_bind_int, sqlite3_bind_text, sqlite3_close, sqlite3_column_int,
-    sqlite3_column_text, sqlite3_exec, sqlite3_finalize, sqlite3_open_v2, sqlite3_prepare_v2,
-    sqlite3_reset, sqlite3_step, sqlite3_stmt, SQLITE_OK, SQLITE_OPEN_CREATE, SQLITE_OPEN_READONLY,
-    SQLITE_OPEN_READWRITE, SQLITE_ROW,
+    sqlite3_column_int64, sqlite3_column_text, sqlite3_exec, sqlite3_finalize, sqlite3_open_v2,
+    sqlite3_prepare_v2, sqlite3_reset, sqlite3_step, sqlite3_stmt, sqlite3_vfs_register, SQLITE_OK,
+    SQLITE_OPEN_CREATE, SQLITE_OPEN_READONLY, SQLITE_OPEN_READWRITE, SQLITE_ROW,
 };
+mod vfs;
 use flate2::read::GzDecoder;
 use regex::Regex;
 use std::collections::*;
@@ -109,6 +110,11 @@ impl Statement {
         Ok(slice.to_string_lossy().to_string())
     }
 
+    pub fn get_int(&mut self, index: usize) -> Result<usize, String> {
+        let val = unsafe { sqlite3_column_int64(self.ptr.as_mut(), index as _) };
+        Ok(val as usize)
+    }
+
     pub fn step(&mut self) -> Result<bool, String> {
         let ret = unsafe { sqlite3_step(self.ptr.as_mut()) };
         //if ret as u32 != SQLITE_OK {
@@ -142,13 +148,15 @@ impl Drop for Database {
 
 impl Database {
     pub fn new() -> Result<Self, String> {
+        let gz_vfs = vfs::Vfs::new()?;
+        std::mem::forget(gz_vfs);
         let mut db = std::ptr::null_mut();
         let ret = unsafe {
             sqlite3_open_v2(
                 b"mans.db\0".as_ptr() as _,
                 &mut db,
                 (SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE) as _,
-                std::ptr::null(),
+                b"gz\0".as_ptr() as _,
             )
         };
         let ptr = if let Some(ptr) = std::ptr::NonNull::new(db) {
@@ -190,66 +198,64 @@ impl Database {
             Some(paths) => paths,
             None => return Err(format!("{} is not defined in the environment.", key)),
         };
-        let mut sections: HashMap<String, Vec<std::path::PathBuf>> = Default::default();
         let mut queue: HashSet<std::path::PathBuf> = Default::default();
 
         for dir in env::split_paths(&dirs) {
-            println!("'{}'", dir.display());
+            //println!("'{}'", dir.display());
             if let Ok(dir) = std::fs::read_dir(dir) {
-                for direntry in dir {
-                    if let Ok(direntry) = direntry {
-                        let path = direntry.path();
-                        println!("'{}'", path.display());
-                        if path.is_dir()
-                            && path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|n| n.starts_with("man"))
-                                .unwrap_or(false)
-                        {
-                            queue.insert(path);
-                        }
+                for direntry in dir.flatten() {
+                    let path = direntry.path();
+                    //println!("'{}'", path.display());
+                    if path.is_dir()
+                        && path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.starts_with("man"))
+                            .unwrap_or(false)
+                    {
+                        queue.insert(path);
                     }
                 }
             }
         }
         let mut pages: HashSet<std::path::PathBuf> = Default::default();
-        let mut datums: HashMap<std::path::PathBuf, String> = Default::default();
-        println!("{:#?}", &queue);
+        //println!("{:#?}", &queue);
         for section in queue.drain() {
             if let Ok(dir) = std::fs::read_dir(section) {
-                for direntry in dir {
-                    if let Ok(direntry) = direntry {
-                        let path = direntry.path();
-                        println!("'{}'", path.display());
-                        if path.is_file()
-                            && path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|n| n.ends_with("gz"))
-                                .unwrap_or(false)
-                        {
-                            pages.insert(path);
-                        }
+                for direntry in dir.flatten() {
+                    let path = direntry.path();
+                    //println!("'{}'", path.display());
+                    if path.is_file()
+                        && path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.ends_with("gz"))
+                            .unwrap_or(false)
+                    {
+                        pages.insert(path);
                     }
                 }
             }
         }
-        println!("{:#?}", &pages);
+        //println!("{:#?}", &pages);
 
-        let mut stmt_insert = Statement::new( self, b"INSERT OR IGNORE INTO page(name, description, section, path,last_modified) VALUES(?, ?, ?, ?, 0) RETURNING id\0")?;
+        let mut stmt_insert = Statement::new( self, b"INSERT OR IGNORE INTO page(name, description, section, path,last_modified) VALUES(?, ?, ?, ?, 0)\0")?;
+        let mut stmt_id = Statement::new(self, b"SELECT id FROM page WHERE name IS ?\0")?;
         let mut stmt_fts = Statement::new(
             self,
             b"INSERT OR IGNORE INTO fts(id, name, content) VALUES(?, ?, ?)\0",
         )?;
 
+        stmt_insert.reset()?;
+        stmt_id.reset()?;
+        stmt_fts.reset()?;
         let nl_re = Regex::new(r"\n(?P<S>\S)").unwrap();
         let ws_re = Regex::new(r"\s\s+").unwrap();
         for page in pages.drain() {
             if let Ok(mut f) = File::open(&page) {
                 let mut bytes = vec![];
                 if f.read_to_end(&mut bytes).is_ok() {
-                    println!("writing {:#?}", &page);
+                    //println!("writing {:#?}", &page);
                     let mut d = GzDecoder::new(bytes.as_slice());
                     let mut bytes2 = vec![];
                     if d.read_to_end(&mut bytes2).is_ok() {
@@ -277,7 +283,7 @@ impl Database {
                         std::thread::spawn(move || {
                             stdin.write_all(&mandoc_output).unwrap();
                         });
-                        println!("mandoc {:#?}", &page);
+                        //println!("mandoc {:#?}", &page);
                         let s = String::from_utf8_lossy(
                             &col.wait_with_output()
                                 .expect("Failed to read stdout")
@@ -297,8 +303,8 @@ impl Database {
                         } else {
                             String::new()
                         };
-                        println!("DESC IS {:?}", &description);
-                        println!("inserting {:#?}", &page);
+                        //println!("DESC IS {:?}", &description);
+                        //println!("inserting {:#?}", &page);
                         let fname = page
                             .file_name()
                             .unwrap()
@@ -310,24 +316,24 @@ impl Database {
                         stmt_insert.bind_int(3, 1)?;
                         //stmt_insert.bind_text(3, &s)?;
                         stmt_insert.bind_text(4, page.to_str().unwrap())?;
-                        if stmt_insert.step()? {
-                            let id = unsafe { sqlite3_column_int(stmt_insert.ptr.as_mut(), 0) };
+                        stmt_insert.step()?;
+                        stmt_insert.reset()?;
+                        stmt_id.bind_text(1, fname)?;
+                        if stmt_id.step()? {
+                            let id = unsafe { sqlite3_column_int(stmt_id.ptr.as_mut(), 0) };
 
-                            println!("inserting id {}", id);
+                            //println!("inserting id {}", id);
                             stmt_fts.bind_int(1, id as _)?;
                             stmt_fts.bind_text(2, fname)?;
                             stmt_fts.bind_text(3, &s)?;
                             stmt_fts.step()?;
                             stmt_fts.reset()?;
                         }
-                        stmt_insert.reset()?;
-
-                        //datums.insert(page, s);
+                        stmt_id.reset()?;
                     }
                 }
             }
         }
-        println!("{:#?}", datums.len());
         drop(stmt_insert);
         drop(stmt_fts);
 
@@ -363,7 +369,12 @@ impl Database {
         }
         let first_col_width = results.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
         for (name, description) in results {
-            println!("{:width$} - {}", name, description, width = first_col_width);
+            println!(
+                "{:width$} - {:.55}",
+                name,
+                description,
+                width = first_col_width
+            );
         }
         let mut results: Vec<(String, String)> = Default::default();
         println!("\ncontent matches:");
@@ -383,11 +394,46 @@ impl Database {
         }
         let first_col_width = results.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
         for (name, description) in results {
-            println!("{:width$} - {}", name, description, width = first_col_width);
+            println!(
+                "{:width$} - {:.55}",
+                name,
+                description,
+                width = first_col_width
+            );
         }
 
         drop(stmt);
 
+        Ok(())
+    }
+    pub fn list(&mut self) -> Result<(), String> {
+        let mut stmt = Statement::new(self, b"select name, description from page ORDER BY name\0")?;
+        let mut results: Vec<(String, String)> = Default::default();
+        while stmt.step()? {
+            let name = stmt.get_text(0)?;
+            let description = stmt.get_text(1)?;
+            results.push((name, description));
+        }
+        let first_col_width = results.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
+        for (name, description) in results {
+            println!(
+                "{:width$} - {:.55}",
+                name,
+                description,
+                width = first_col_width
+            );
+        }
+        drop(stmt);
+        Ok(())
+    }
+
+    pub fn count(&mut self) -> Result<(), String> {
+        let mut stmt = Statement::new(self, b"select count(*) from page\0")?;
+        while stmt.step()? {
+            let count = stmt.get_int(0)?;
+            println!("{}", count);
+        }
+        drop(stmt);
         Ok(())
     }
 }
