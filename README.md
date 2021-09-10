@@ -5,6 +5,8 @@
 
 The `sqlite3` C bindings were generated with `bindgen`. The sqlite3 database is gzipped with a custom [`VFS` layer](https://sqlite.org/vfs.html) extension located in [`src/db/vfs.rs`](./src/db/vfs.rs).
 
+The gzip version is 38MiB compared to 117MiB uncompressed.
+
 ```shell
 % ./target/release/buke socket
 systemd-socket-proxyd.8         - systemd-socket-proxyd - Bidirectionally proxy local soc
@@ -33,4 +35,28 @@ udp.7       - udp - User Datagram Protocol for IPv4
 netstat.8   - netstat - Print network connections, routing tables, in
 sock_diag.7 - sock_diag - obtaining information about sockets
 vsock.7     - vsock - Linux VSOCK address family
+```
+
+Regular expression match if build with `re` feature (default) or if your sqlite3 version includes a `REGEXP` implementation:
+
+```shell
+% target/release/buke -r 'system_[^_]*_types'
+system_data_types.7 - system_data_types - overview of system data types
+
+content matches:
+FILE.3      - system_data_types - overview of system data types
+time_t.3    - system_data_types - overview of system data types
+fenv_t.3    - system_data_types - overview of system data types
+uint64_t.3  - system_data_types - overview of system data types
+va_list.3   - system_data_types - overview of system data types
+dev_t.3     - system_data_types - overview of system data types
+size_t.3    - system_data_types - overview of system data types
+float_t.3   - system_data_types - overview of system data types
+uintN_t.3   - system_data_types - overview of system data types
+ptrdiff_t.3 - system_data_types - overview of system data types
+int16_t.3   - system_data_types - overview of system data types
+ftm.7       - feature_test_macros - feature test macros
+clockid_t.3 - system_data_types - overview of system data types
+off_t.3     - system_data_types - overview of system data types
+div_t.3     - system_data_types - overview of system data types
 ```

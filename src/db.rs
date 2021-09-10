@@ -145,6 +145,39 @@ impl Drop for Database {
         }
     }
 }
+#[cfg(feature = "re")]
+unsafe extern "C" fn _sqlite_regexp(
+    ctx: *mut self::bindings::sqlite3_context,
+    argc: ::std::os::raw::c_int,
+    argv: *mut *mut self::bindings::sqlite3_value,
+) {
+    use self::bindings::{
+        sqlite3_result_error, sqlite3_result_int, sqlite3_value, sqlite3_value_text,
+    };
+    assert_eq!(argc, 2);
+    let slice: &mut [*mut sqlite3_value] = std::slice::from_raw_parts_mut(argv, argc as usize);
+    let re_pattern: *const ::std::os::raw::c_uchar = sqlite3_value_text(slice[0]);
+    let re_match: *const ::std::os::raw::c_uchar = sqlite3_value_text(slice[1]);
+    let re_pattern = std::ffi::CStr::from_ptr(re_pattern as _);
+    let re_match = std::ffi::CStr::from_ptr(re_match as _);
+    match (
+        re_pattern
+            .to_str()
+            .map_err(|err| err.to_string())
+            .and_then(|s| regex::Regex::new(s).map_err(|err| err.to_string())),
+        re_match.to_str().map_err(|err| err.to_string()),
+    ) {
+        (Ok(re_pattern), Ok(re_match)) => {
+            //eprintln!("matching {:?} with {:?}", &re_pattern, &re_match);
+            sqlite3_result_int(ctx, re_pattern.is_match(re_match) as _);
+        }
+        (Err(err), _) | (Ok(_), Err(err)) => {
+            eprintln!("regex err:{} ", &err);
+            let string = std::ffi::CString::new(err).unwrap();
+            sqlite3_result_error(ctx, string.as_ptr(), -1);
+        }
+    }
+}
 
 impl Database {
     pub fn new() -> Result<Self, String> {
@@ -159,13 +192,29 @@ impl Database {
                 b"gz\0".as_ptr() as _,
             )
         };
-        let ptr = if let Some(ptr) = std::ptr::NonNull::new(db) {
+        let mut ptr = if let Some(ptr) = std::ptr::NonNull::new(db) {
             ptr
         } else {
             let errmsg = unsafe { bindings::sqlite3_errstr(ret) };
             let slice = unsafe { std::ffi::CStr::from_ptr(errmsg) };
             return Err(slice.to_str().unwrap().to_string());
         };
+        #[cfg(feature = "re")]
+        {
+            use self::bindings::{sqlite3_create_function, SQLITE_DETERMINISTIC, SQLITE_UTF8};
+            let _ret = unsafe {
+                sqlite3_create_function(
+                    ptr.as_mut(),
+                    b"regexp\0".as_ptr() as _,
+                    2,
+                    (SQLITE_UTF8 | SQLITE_DETERMINISTIC) as _,
+                    std::ptr::null_mut(),
+                    Some(_sqlite_regexp),
+                    None,
+                    None,
+                )
+            };
+        }
         Ok(Database {
             ptr,
             readonly: false,
@@ -340,19 +389,25 @@ impl Database {
         Ok(())
     }
 
-    pub fn query(&mut self, mut query: String) -> Result<(), String> {
+    pub fn query(&mut self, mut query: String, is_re: bool) -> Result<bool, String> {
         let mut names: BTreeSet<String> = Default::default();
-        if !query.starts_with("*") {
-            query.insert(0, '*');
-        }
-        if !query.ends_with("*") {
-            query.push('*');
+        if !is_re {
+            if !query.starts_with("*") {
+                query.insert(0, '*');
+            }
+            if !query.ends_with("*") {
+                query.push('*');
+            }
         }
         let mut results: Vec<(String, String)> = Default::default();
         {
             let mut stmt = Statement::new(
                 self,
-                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.name glob ? ORDER BY bm25(fts) LIMIT 15\0",
+                if is_re {
+                    b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.name REGEXP ? ORDER BY bm25(fts) LIMIT 15\0"
+                } else {
+                    b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.name GLOB ? ORDER BY bm25(fts) LIMIT 15\0"
+                },
             )?;
             //let query = query.replace("\"", "\"\"");
             stmt.bind_text(1, &query)?;
@@ -367,6 +422,7 @@ impl Database {
 
             drop(stmt);
         }
+        let mut any_match = !results.is_empty();
         let first_col_width = results.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
         for (name, description) in results {
             println!(
@@ -377,10 +433,14 @@ impl Database {
             );
         }
         let mut results: Vec<(String, String)> = Default::default();
-        println!("\ncontent matches:");
         let mut stmt = Statement::new(
             self,
-                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.content glob ? ORDER BY bm25(fts) LIMIT 15\0",
+            if is_re {
+                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.content REGEXP ? ORDER BY bm25(fts) LIMIT 15\0"
+            } else {
+                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.content GLOB ? ORDER BY bm25(fts) LIMIT 15\0"
+            },
+            //b"select name, description from page where name REGEXP ? or content LIMIT 15\0",
         )?;
         //let query = query.replace("\"", "\"\"");
         stmt.bind_text(1, &query)?;
@@ -392,7 +452,11 @@ impl Database {
             }
             results.push((name, description));
         }
+        any_match |= !results.is_empty();
         let first_col_width = results.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
+        if !results.is_empty() {
+            println!("\ncontent matches:");
+        }
         for (name, description) in results {
             println!(
                 "{:width$} - {:.55}",
@@ -404,8 +468,9 @@ impl Database {
 
         drop(stmt);
 
-        Ok(())
+        Ok(any_match)
     }
+
     pub fn list(&mut self) -> Result<(), String> {
         let mut stmt = Statement::new(self, b"select name, description from page ORDER BY name\0")?;
         let mut results: Vec<(String, String)> = Default::default();

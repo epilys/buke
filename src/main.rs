@@ -23,7 +23,7 @@ mod db;
 
 use db::Database;
 
-fn main() {
+fn run_app() -> Result<(), ()> {
     let mut db = Database::new().unwrap();
     db.run_create_statements().unwrap();
     let args = std::env::args_os()
@@ -31,22 +31,35 @@ fn main() {
         .map(std::ffi::OsString::into_string)
         .collect::<Result<Vec<_>, _>>();
     if let Ok(mut args) = args {
-        if args.len() < 1 {
-            println!("usage: buke [--build] [--list] [--count] 'query terms'");
-            return;
+        if args.is_empty() {
+            println!("usage: buke [--build] [--list] [--count] [-r|--re] 'query terms'");
+            return Err(());
         }
-        while let Some(query) = args.pop() {
-            if query == "--build" {
+        let is_re: bool = args.iter().any(|arg| arg == "-r" || arg == "--re");
+        while let Some(arg) = args.pop() {
+            if arg == "-r" || arg == "--re" {
+                continue;
+            } else if arg == "--build" {
                 db.build().unwrap();
-            } else if query == "--list" {
+            } else if arg == "--list" {
                 db.list().unwrap();
                 break;
-            } else if query == "--count" {
+            } else if arg == "--count" {
                 db.count().unwrap();
                 break;
             } else {
-                db.query(query).unwrap();
+                if !db.query(arg, is_re).unwrap() {
+                    return Err(());
+                }
             }
         }
     }
+    Ok(())
+}
+
+fn main() {
+    std::process::exit(match run_app() {
+        Ok(_) => 0,
+        Err(_) => 1,
+    });
 }
