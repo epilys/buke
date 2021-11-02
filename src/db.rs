@@ -26,8 +26,8 @@ mod bindings;
 use self::bindings::{
     sqlite3, sqlite3_bind_int, sqlite3_bind_text, sqlite3_close, sqlite3_column_int,
     sqlite3_column_int64, sqlite3_column_text, sqlite3_exec, sqlite3_finalize, sqlite3_open_v2,
-    sqlite3_prepare_v2, sqlite3_reset, sqlite3_step, sqlite3_stmt, sqlite3_vfs_register, SQLITE_OK,
-    SQLITE_OPEN_CREATE, SQLITE_OPEN_READONLY, SQLITE_OPEN_READWRITE, SQLITE_ROW,
+    sqlite3_prepare_v2, sqlite3_reset, sqlite3_step, sqlite3_stmt, SQLITE_OK, SQLITE_OPEN_CREATE,
+    SQLITE_OPEN_READWRITE, SQLITE_ROW,
 };
 mod vfs;
 use flate2::read::GzDecoder;
@@ -36,7 +36,6 @@ use std::collections::*;
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
-use std::path::Path;
 
 struct Statement {
     ptr: std::ptr::NonNull<sqlite3_stmt>,

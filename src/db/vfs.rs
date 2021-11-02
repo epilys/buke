@@ -22,8 +22,8 @@
 use super::bindings::{
     sqlite3_errstr, sqlite3_file, sqlite3_int64, sqlite3_io_methods, sqlite3_vfs, sqlite3_vfs_find,
     sqlite3_vfs_register, SQLITE_IOCAP_ATOMIC, SQLITE_IOCAP_POWERSAFE_OVERWRITE,
-    SQLITE_IOCAP_SAFE_APPEND, SQLITE_IOCAP_SEQUENTIAL, SQLITE_IOERR, SQLITE_IOERR_READ,
-    SQLITE_IOERR_SHORT_READ, SQLITE_NOTFOUND, SQLITE_OK,
+    SQLITE_IOCAP_SAFE_APPEND, SQLITE_IOCAP_SEQUENTIAL, SQLITE_IOERR_SHORT_READ, SQLITE_NOTFOUND,
+    SQLITE_OK,
 };
 
 use flate2::read::GzDecoder;
@@ -34,7 +34,7 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
-use std::io::{self, Cursor, SeekFrom};
+use std::io::{Cursor, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -60,8 +60,8 @@ unsafe extern "C" fn gzOpen(
     vfs: *mut sqlite3_vfs,
     zPath: *const ::std::os::raw::c_char,
     file_ptr: *mut sqlite3_file,
-    flags: ::std::os::raw::c_int,
-    pOutFlags: *mut ::std::os::raw::c_int,
+    _flags: ::std::os::raw::c_int,
+    _pOutFlags: *mut ::std::os::raw::c_int,
 ) -> ::std::os::raw::c_int {
     let mut vfs_ptr = if let Some(ptr) = std::ptr::NonNull::new(vfs) {
         ptr
@@ -348,8 +348,8 @@ unsafe extern "C" fn gzTruncate(
 }
 
 unsafe extern "C" fn gzSync(
-    file_ptr: *mut sqlite3_file,
-    flags: ::std::os::raw::c_int,
+    _file_ptr: *mut sqlite3_file,
+    _flags: ::std::os::raw::c_int,
 ) -> ::std::os::raw::c_int {
     //eprintln!("sync");
     //return gzClose(file_ptr);
@@ -395,11 +395,11 @@ unsafe extern "C" fn gzFileSize(
 
 unsafe extern "C" fn gzLock(
     file_ptr: *mut sqlite3_file,
-    arg2: ::std::os::raw::c_int,
+    _arg2: ::std::os::raw::c_int,
 ) -> ::std::os::raw::c_int {
     let mut gz_conn: std::ptr::NonNull<gzConn> =
         std::ptr::NonNull::new(file_ptr as *mut gzConn).expect("null file_ptr in gzOpen");
-    let gz_conn_ref = gz_conn.as_mut();
+    let _gz_conn_ref = gz_conn.as_mut();
 
     /*let ret = unsafe {
             ((*gz_conn_ref.sub.pMethods).xLock.unwrap())(&mut gz_conn_ref.sub as *mut _, arg2)
@@ -412,11 +412,11 @@ unsafe extern "C" fn gzLock(
 
 unsafe extern "C" fn gzUnlock(
     file_ptr: *mut sqlite3_file,
-    arg2: ::std::os::raw::c_int,
+    _arg2: ::std::os::raw::c_int,
 ) -> ::std::os::raw::c_int {
     let mut gz_conn: std::ptr::NonNull<gzConn> =
         std::ptr::NonNull::new(file_ptr as *mut gzConn).expect("null file_ptr in gzOpen");
-    let gz_conn_ref = gz_conn.as_mut();
+    let _gz_conn_ref = gz_conn.as_mut();
 
     /*
         let ret = unsafe {
@@ -434,7 +434,7 @@ unsafe extern "C" fn gzCheckReservedLock(
 ) -> ::std::os::raw::c_int {
     let mut gz_conn: std::ptr::NonNull<gzConn> =
         std::ptr::NonNull::new(file_ptr as *mut gzConn).expect("null file_ptr in gzOpen");
-    let gz_conn_ref = gz_conn.as_mut();
+    let _gz_conn_ref = gz_conn.as_mut();
 
     /*
         let ret = unsafe {
@@ -452,12 +452,12 @@ unsafe extern "C" fn gzCheckReservedLock(
 
 unsafe extern "C" fn gzFileControl(
     file_ptr: *mut sqlite3_file,
-    op: ::std::os::raw::c_int,
-    pArg: *mut ::std::os::raw::c_void,
+    _op: ::std::os::raw::c_int,
+    _pArg: *mut ::std::os::raw::c_void,
 ) -> ::std::os::raw::c_int {
     let mut gz_conn: std::ptr::NonNull<gzConn> =
         std::ptr::NonNull::new(file_ptr as *mut gzConn).expect("null file_ptr in gzOpen");
-    let gz_conn_ref = gz_conn.as_mut();
+    let _gz_conn_ref = gz_conn.as_mut();
 
     /*
     let ret = unsafe {
@@ -476,7 +476,7 @@ unsafe extern "C" fn gzFileControl(
 unsafe extern "C" fn gzSectorSize(file_ptr: *mut sqlite3_file) -> ::std::os::raw::c_int {
     let mut gz_conn: std::ptr::NonNull<gzConn> =
         std::ptr::NonNull::new(file_ptr as *mut gzConn).expect("null file_ptr in gzOpen");
-    let gz_conn_ref = gz_conn.as_mut();
+    let _gz_conn_ref = gz_conn.as_mut();
 
     /*let ret = unsafe {
             ((*gz_conn_ref.sub.pMethods).xSectorSize.unwrap())(&mut gz_conn_ref.sub as *mut _)
@@ -490,7 +490,7 @@ unsafe extern "C" fn gzSectorSize(file_ptr: *mut sqlite3_file) -> ::std::os::raw
 unsafe extern "C" fn gzDeviceCharacteristics(file_ptr: *mut sqlite3_file) -> ::std::os::raw::c_int {
     let mut gz_conn: std::ptr::NonNull<gzConn> =
         std::ptr::NonNull::new(file_ptr as *mut gzConn).expect("null file_ptr in gzOpen");
-    let gz_conn_ref = gz_conn.as_mut();
+    let _gz_conn_ref = gz_conn.as_mut();
 
     //let ret = unsafe {
     //    ((*gz_conn_ref.sub.pMethods).xDeviceCharacteristics.unwrap())(
