@@ -24,8 +24,6 @@ mod db;
 use db::Database;
 
 fn run_app() -> Result<(), ()> {
-    let mut db = Database::new().unwrap();
-    db.run_create_statements().unwrap();
     let args = std::env::args_os()
         .skip(1)
         .map(std::ffi::OsString::into_string)
@@ -40,14 +38,19 @@ fn run_app() -> Result<(), ()> {
             if arg == "-r" || arg == "--re" {
                 continue;
             } else if arg == "--build" {
+                let mut db = Database::new(false).unwrap();
+                db.run_create_statements().unwrap();
                 db.build().unwrap();
             } else if arg == "--list" {
+                let mut db = Database::new(true).unwrap();
                 db.list().unwrap();
                 break;
             } else if arg == "--count" {
+                let mut db = Database::new(true).unwrap();
                 db.count().unwrap();
                 break;
             } else {
+                let mut db = Database::new(true).unwrap();
                 if !db.query(arg, is_re).unwrap() {
                     return Err(());
                 }

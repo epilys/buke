@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 flate2 = "1.0"
 regex = { version = "1", optional = true }
+nix = "*"
 
 [features]
 default = ["re"]

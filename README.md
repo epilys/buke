@@ -3,9 +3,21 @@
 - `cargo run --release -- --build` builds an sqlite3 database out of all manpages in your `$MANPATH`
 - `cargo run --release -- "query"` searches for "query" in the index
 
-The `sqlite3` C bindings were generated with `bindgen`. The sqlite3 database is gzipped with a custom [`VFS` layer](https://sqlite.org/vfs.html) extension located in [`src/db/vfs.rs`](./src/db/vfs.rs).
+The `sqlite3` C bindings were generated with `bindgen`. The sqlite3 database is gzipped in blocks with a custom [`VFS` layer](https://sqlite.org/vfs.html) extension located in [`src/db/vfs.rs`](./src/db/vfs.rs).
 
-The gzip version is 38MiB compared to 117MiB uncompressed.
+The gzip version is 42MiB compared to 117MiB uncompressed.
+
+## Use
+
+First, build the database:
+
+```shell
+% ./target/release/buke --build
+Wait patiently, this part wasn't optimized (or bothered with)
+306/10689 done..^C
+```
+
+Then query:
 
 ```shell
 % ./target/release/buke socket

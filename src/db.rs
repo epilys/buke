@@ -27,7 +27,7 @@ use self::bindings::{
     sqlite3, sqlite3_bind_int, sqlite3_bind_text, sqlite3_close, sqlite3_column_int,
     sqlite3_column_int64, sqlite3_column_text, sqlite3_exec, sqlite3_finalize, sqlite3_open_v2,
     sqlite3_prepare_v2, sqlite3_reset, sqlite3_step, sqlite3_stmt, SQLITE_OK, SQLITE_OPEN_CREATE,
-    SQLITE_OPEN_READWRITE, SQLITE_ROW,
+    SQLITE_OPEN_READONLY, SQLITE_OPEN_READWRITE, SQLITE_ROW,
 };
 mod vfs;
 use flate2::read::GzDecoder;
@@ -38,14 +38,19 @@ use std::fs::File;
 use std::io::prelude::*;
 
 struct Statement {
+    sql: &'static [u8],
     ptr: std::ptr::NonNull<sqlite3_stmt>,
 }
 
 impl Drop for Statement {
     fn drop(&mut self) {
         let ret = unsafe { sqlite3_finalize(self.ptr.as_mut()) };
-        if ret as u32 != SQLITE_OK {
-            eprintln!("sqlite3_finalize returned {}", ret);
+        if ret != SQLITE_OK {
+            eprintln!(
+                "sqlite3_finalize {:?} returned {}",
+                unsafe { std::str::from_utf8_unchecked(self.sql) },
+                ret
+            );
         }
     }
 }
@@ -73,7 +78,7 @@ impl Statement {
             ));
         };
 
-        Ok(Statement { ptr })
+        Ok(Statement { sql, ptr })
     }
 
     pub fn bind_text(&mut self, index: usize, text: &str) -> Result<(), String> {
@@ -86,7 +91,7 @@ impl Statement {
                 None,
             )
         };
-        if ret as u32 != SQLITE_OK {
+        if ret != SQLITE_OK {
             return Err(format!("sqlite3_bind_text returned {}", ret));
         }
         Ok(())
@@ -94,7 +99,7 @@ impl Statement {
 
     pub fn bind_int(&mut self, index: usize, int: usize) -> Result<(), String> {
         let ret = unsafe { sqlite3_bind_int(self.ptr.as_mut(), index as _, int as _) };
-        if ret as u32 != SQLITE_OK {
+        if ret != SQLITE_OK {
             return Err(format!("sqlite3_bind_int returned {}", ret));
         }
         Ok(())
@@ -116,15 +121,15 @@ impl Statement {
 
     pub fn step(&mut self) -> Result<bool, String> {
         let ret = unsafe { sqlite3_step(self.ptr.as_mut()) };
-        //if ret as u32 != SQLITE_OK {
+        //if ret!= SQLITE_OK {
         //   return Err(format!("sqlite3_step returned {}", ret));
         //}
         //eprintln!("step returned {}", ret);
-        Ok(ret as u32 == SQLITE_ROW)
+        Ok(ret == SQLITE_ROW)
     }
     pub fn reset(&mut self) -> Result<(), String> {
         let ret = unsafe { sqlite3_reset(self.ptr.as_mut()) };
-        if ret as u32 != SQLITE_OK {
+        if ret != SQLITE_OK {
             return Err(format!("sqlite3_reset returned {}", ret));
         }
         Ok(())
@@ -139,8 +144,25 @@ pub struct Database {
 impl Drop for Database {
     fn drop(&mut self) {
         let ret = unsafe { sqlite3_close(self.ptr.as_mut()) };
-        if ret as u32 != SQLITE_OK {
+        if ret != SQLITE_OK {
             eprintln!("sqlite3_close returned {}", ret);
+        }
+
+        if !self.readonly {
+            use std::fs::OpenOptions;
+            let mut s = vec![];
+            File::open("./mans.db")
+                .unwrap()
+                .read_to_end(&mut s)
+                .unwrap();
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("./mans.db")
+                .unwrap();
+            unsafe { vfs::write_to_file(&mut file, &s).unwrap() };
         }
     }
 }
@@ -179,17 +201,33 @@ unsafe extern "C" fn _sqlite_regexp(
 }
 
 impl Database {
-    pub fn new() -> Result<Self, String> {
-        let gz_vfs = vfs::Vfs::new()?;
-        std::mem::forget(gz_vfs);
+    pub fn new(readonly: bool) -> Result<Self, String> {
+        if readonly {
+            let gz_vfs = vfs::Vfs::new()?;
+            std::mem::forget(gz_vfs);
+        }
         let mut db = std::ptr::null_mut();
-        let ret = unsafe {
-            sqlite3_open_v2(
-                b"mans.db\0".as_ptr() as _,
-                &mut db,
-                (SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE) as _,
-                b"gz\0".as_ptr() as _,
-            )
+        let ret = if readonly {
+            if !std::path::Path::new("./mans.db").exists() {
+                return Err("db does not exist".to_string());
+            }
+            unsafe {
+                sqlite3_open_v2(
+                    b"mans.db\0".as_ptr() as _,
+                    &mut db,
+                    SQLITE_OPEN_READONLY,
+                    b"gz\0".as_ptr() as _,
+                )
+            }
+        } else {
+            unsafe {
+                sqlite3_open_v2(
+                    b"mans.db\0".as_ptr() as _,
+                    &mut db,
+                    SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE,
+                    b"unix\0".as_ptr() as _,
+                )
+            }
         };
         let mut ptr = if let Some(ptr) = std::ptr::NonNull::new(db) {
             ptr
@@ -206,7 +244,7 @@ impl Database {
                     ptr.as_mut(),
                     b"regexp\0".as_ptr() as _,
                     2,
-                    (SQLITE_UTF8 | SQLITE_DETERMINISTIC) as _,
+                    SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                     std::ptr::null_mut(),
                     Some(_sqlite_regexp),
                     None,
@@ -214,10 +252,7 @@ impl Database {
                 )
             };
         }
-        Ok(Database {
-            ptr,
-            readonly: false,
-        })
+        Ok(Database { ptr, readonly })
     }
 
     pub fn run_create_statements(&mut self) -> Result<(), String> {
@@ -233,9 +268,12 @@ impl Database {
                 &mut errmsg,
             )
         };
-        if ret as u32 != SQLITE_OK {
-            let slice = unsafe { std::ffi::CStr::from_ptr(errmsg) };
-            return Err(slice.to_str().unwrap().to_string());
+        if ret != SQLITE_OK {
+            if !errmsg.is_null() {
+                let slice = unsafe { std::ffi::CStr::from_ptr(errmsg) };
+                return Err(slice.to_str().unwrap().to_string());
+            }
+            return Err(ret.to_string());
         }
         Ok(())
     }
@@ -299,7 +337,9 @@ impl Database {
         stmt_fts.reset()?;
         let nl_re = Regex::new(r"\n(?P<S>\S)").unwrap();
         let ws_re = Regex::new(r"\s\s+").unwrap();
-        for page in pages.drain() {
+        let total = pages.len();
+        println!("Wait patiently, this part wasn't optimized (or bothered with)");
+        for (i, page) in pages.drain().enumerate() {
             if let Ok(mut f) = File::open(&page) {
                 let mut bytes = vec![];
                 if f.read_to_end(&mut bytes).is_ok() {
@@ -381,7 +421,9 @@ impl Database {
                     }
                 }
             }
+            print!("\r{}/{} done..", i, total);
         }
+        println!("{} pages finished.", total);
         drop(stmt_insert);
         drop(stmt_fts);
 
@@ -403,9 +445,9 @@ impl Database {
             let mut stmt = Statement::new(
                 self,
                 if is_re {
-                    b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.name REGEXP ? ORDER BY bm25(fts) LIMIT 15\0"
+                    b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.name REGEXP ? ORDER BY bm25(fts) LIMIT 25\0"
                 } else {
-                    b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.name GLOB ? ORDER BY bm25(fts) LIMIT 15\0"
+                    b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.name GLOB ? ORDER BY bm25(fts) LIMIT 25\0"
                 },
             )?;
             //let query = query.replace("\"", "\"\"");
@@ -435,9 +477,9 @@ impl Database {
         let mut stmt = Statement::new(
             self,
             if is_re {
-                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.content REGEXP ? ORDER BY bm25(fts) LIMIT 15\0"
+                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.content REGEXP ? ORDER BY bm25(fts) LIMIT 25\0"
             } else {
-                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.content GLOB ? ORDER BY bm25(fts) LIMIT 15\0"
+                b"select fts.name, page.description from fts as fts JOIN page ON page.id=fts.id where fts.content GLOB ? ORDER BY bm25(fts) LIMIT 25\0"
             },
             //b"select name, description from page where name REGEXP ? or content LIMIT 15\0",
         )?;
@@ -455,6 +497,8 @@ impl Database {
         let first_col_width = results.iter().map(|(n, _)| n.len()).max().unwrap_or(1);
         if !results.is_empty() {
             println!("\ncontent matches:");
+        } else {
+            println!("\nno results");
         }
         for (name, description) in results {
             println!(
